@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src https://cdn.jsdelivr.net 'unsafe-inline';">
+    <title>ReconX Dashboard — {{ target }}</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        :root {
+            --bg: #0d1117; --surface: #161b22; --border: #30363d;
+            --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff;
+            --green: #3fb950; --yellow: #d29922; --orange: #db6d28; --red: #f85149;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg); color: var(--text); line-height: 1.6; padding: 2rem;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 2rem; }
+        .header h1 { color: var(--accent); font-size: 2rem; }
+        .header p { color: var(--text-dim); }
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 2rem 0; }
+        .metric-card {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+            padding: 1.5rem; text-align: center; transition: transform 0.2s;
+        }
+        .metric-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+        .metric-card .value { font-size: 2.5rem; font-weight: bold; color: var(--accent); }
+        .metric-card .label { font-size: 0.85rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+        .metric-card.critical .value { color: var(--red); }
+        .metric-card.warning .value { color: var(--yellow); }
+        .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin: 2rem 0; }
+        .chart-card {
+            background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+            padding: 1.5rem;
+        }
+        .chart-card h3 { color: var(--text-dim); margin-bottom: 1rem; font-size: 0.9rem; text-transform: uppercase; }
+        h2 { color: var(--text); margin: 2rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+        th {
+            background: var(--surface); color: var(--accent); text-align: left;
+            padding: 0.75rem; border-bottom: 2px solid var(--border); font-size: 0.8rem;
+            text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        td { padding: 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+        tr:hover td { background: rgba(88, 166, 255, 0.05); }
+        .score { font-weight: bold; }
+        .score-high { color: var(--red); }
+        .score-medium { color: var(--yellow); }
+        .score-low { color: var(--green); }
+        .tag { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.7rem; margin: 0.1rem; background: rgba(88,166,255,0.15); color: var(--accent); }
+        .footer { margin-top: 3rem; text-align: center; color: var(--text-dim); font-size: 0.8rem; }
+        @media (max-width: 768px) { .charts { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 ReconX Dashboard</h1>
+            <p>{{ target }} | Scan #{{ scan_id }} | {{ generated_at }}</p>
+        </div>
+
+        <div class="metrics">
+            <div class="metric-card">
+                <div class="value">{{ summary.get('subdomains', 0) }}</div>
+                <div class="label">Total Assets</div>
+            </div>
+            <div class="metric-card">
+                <div class="value">{{ summary.get('hosts', 0) }}</div>
+                <div class="label">Live Hosts</div>
+            </div>
+            <div class="metric-card">
+                <div class="value">{{ summary.get('ports', 0) }}</div>
+                <div class="label">Open Ports</div>
+            </div>
+            <div class="metric-card">
+                <div class="value">{{ summary.get('urls', 0) + summary.get('historical_urls', 0) }}</div>
+                <div class="label">Endpoints</div>
+            </div>
+            <div class="metric-card">
+                <div class="value">{{ summary.get('js_files', 0) }}</div>
+                <div class="label">JS Files</div>
+            </div>
+            <div class="metric-card">
+                <div class="value">{{ summary.get('js_findings', 0) }}</div>
+                <div class="label">Secrets Found</div>
+            </div>
+            <div class="metric-card critical">
+                <div class="value">{{ severity_counts.get('critical', 0) }}</div>
+                <div class="label">Critical</div>
+            </div>
+            <div class="metric-card warning">
+                <div class="value">{{ severity_counts.get('high', 0) }}</div>
+                <div class="label">High</div>
+            </div>
+        </div>
+
+        <div class="charts">
+            <div class="chart-card">
+                <h3>Technology Breakdown</h3>
+                <canvas id="techChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Findings by Severity</h3>
+                <canvas id="severityChart"></canvas>
+            </div>
+        </div>
+
+        {% if profiles %}
+        <h2>🎯 Top Risk-Scored Assets</h2>
+        <table>
+            <thead>
+                <tr><th>Score</th><th>Host</th><th>Technologies</th><th>Top Reasons</th></tr>
+            </thead>
+            <tbody>
+                {% for p in profiles %}
+                <tr>
+                    <td><span class="score {% if p.risk_score >= 75 %}score-high{% elif p.risk_score >= 50 %}score-medium{% else %}score-low{% endif %}">{{ p.risk_score }}</span></td>
+                    <td>{{ p.host }}</td>
+                    <td>{% for t in p.technologies[:4] %}<span class="tag">{{ t }}</span>{% endfor %}</td>
+                    <td>{% for r in p.reasons[:2] %}{{ r }}<br>{% endfor %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+
+        <div class="footer">
+            <p>ReconX — Attack Surface Intelligence Framework</p>
+        </div>
+    </div>
+
+    <script>
+        const techLabels = {{ tech_labels }};
+        const techValues = {{ tech_values }};
+        const sevLabels = {{ severity_labels }};
+        const sevValues = {{ severity_values }};
+
+        const colors = {
+            bg: '#161b22', accent: '#58a6ff', green: '#3fb950',
+            yellow: '#d29922', orange: '#db6d28', red: '#f85149', dim: '#8b949e'
+        };
+
+        if (techLabels.length > 0) {
+            new Chart(document.getElementById('techChart'), {
+                type: 'bar',
+                data: {
+                    labels: techLabels,
+                    datasets: [{
+                        label: 'Count',
+                        data: techValues,
+                        backgroundColor: colors.accent + '80',
+                        borderColor: colors.accent,
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { ticks: { color: colors.dim }, grid: { color: '#30363d' } },
+                        y: { ticks: { color: '#e6edf3', font: { size: 11 } }, grid: { display: false } }
+                    }
+                }
+            });
+        }
+
+        const sevColors = {
+            critical: colors.red, high: colors.orange,
+            medium: colors.yellow, low: colors.green, info: colors.dim
+        };
+
+        if (sevLabels.length > 0) {
+            new Chart(document.getElementById('severityChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: sevLabels.map(s => s.charAt(0).toUpperCase() + s.slice(1)),
+                    datasets: [{
+                        data: sevValues,
+                        backgroundColor: sevLabels.map(s => sevColors[s] || colors.dim),
+                        borderColor: colors.bg,
+                        borderWidth: 3
+                    }]
+                },
+                options: {
+                    plugins: {
+                        legend: { position: 'right', labels: { color: '#e6edf3', padding: 15, font: { size: 12 } } }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
