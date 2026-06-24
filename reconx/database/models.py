@@ -31,7 +31,7 @@ class Scan(Base):
     target: Mapped[str] = mapped_column(String(512))
     scan_type: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), default="pending")
-    started_at: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    started_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     finished_at: Mapped[Optional[datetime]] = mapped_column(default=None)
 
 
@@ -47,7 +47,7 @@ class Scope(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     target: Mapped[str] = mapped_column(String(512))
     scope_type: Mapped[str] = mapped_column(String(16))  # 'include' or 'exclude'
-    created_at: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class Subdomain(Base):
@@ -64,7 +64,7 @@ class Subdomain(Base):
     root_domain: Mapped[str] = mapped_column(String(512))
     subdomain: Mapped[str] = mapped_column(String(512))
     source: Mapped[str] = mapped_column(String(128))
-    created_at: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class Port(Base):
@@ -80,7 +80,7 @@ class Port(Base):
     host: Mapped[str] = mapped_column(String(512))
     port: Mapped[int] = mapped_column()
     service: Mapped[Optional[str]] = mapped_column(String(128), default=None)
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class Host(Base):
@@ -103,7 +103,7 @@ class Host(Base):
     screenshot_path: Mapped[Optional[str]] = mapped_column(
         String(1024), default=None
     )
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class URL(Base):
@@ -120,7 +120,7 @@ class URL(Base):
     host: Mapped[str] = mapped_column(String(512))
     url: Mapped[str] = mapped_column(String(2048))
     source: Mapped[str] = mapped_column(String(128))
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class HistoricalURL(Base):
@@ -136,7 +136,7 @@ class HistoricalURL(Base):
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"))
     url: Mapped[str] = mapped_column(String(2048))
     source: Mapped[str] = mapped_column(String(128))
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class JSFile(Base):
@@ -152,7 +152,7 @@ class JSFile(Base):
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"))
     url: Mapped[str] = mapped_column(String(2048))
     host: Mapped[str] = mapped_column(String(512))
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class JSFinding(Base):
@@ -169,7 +169,7 @@ class JSFinding(Base):
     finding_type: Mapped[str] = mapped_column(String(128))
     value: Mapped[str] = mapped_column(Text)
     source_url: Mapped[str] = mapped_column(String(2048))
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class EndpointClassification(Base):
@@ -185,7 +185,7 @@ class EndpointClassification(Base):
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"))
     url: Mapped[str] = mapped_column(String(2048))
     category: Mapped[str] = mapped_column(String(128))
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class AssetProfile(Base):
@@ -206,7 +206,7 @@ class AssetProfile(Base):
     )  # JSON
     risk_score: Mapped[int] = mapped_column(default=0)
     reasons: Mapped[Optional[str]] = mapped_column(Text, default=None)  # JSON
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class Finding(Base):
@@ -225,7 +225,7 @@ class Finding(Base):
     host: Mapped[str] = mapped_column(String(512))
     url: Mapped[Optional[str]] = mapped_column(String(2048), default=None)
     description: Mapped[Optional[str]] = mapped_column(Text, default=None)
-    timestamp: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
 
 class ChangeEvent(Base):
@@ -241,4 +241,4 @@ class ChangeEvent(Base):
     target: Mapped[str] = mapped_column(String(512))
     event_type: Mapped[str] = mapped_column(String(128))
     detail: Mapped[str] = mapped_column(Text)
-    detected_at: Mapped[datetime] = mapped_column(default_factory=datetime.utcnow)
+    detected_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)

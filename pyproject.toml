@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "reconx"
@@ -17,6 +17,7 @@ classifiers = [
     "Intended Audience :: Information Technology",
     "Topic :: Security",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: POSIX :: Linux",
 ]
 
@@ -31,6 +32,12 @@ dependencies = [
     "aiohttp>=3.9.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
 [project.scripts]
 reconx = "reconx.cli:app"
 
@@ -39,3 +46,8 @@ include = ["reconx*"]
 
 [tool.setuptools.package-data]
 reconx = ["reporting/templates/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+

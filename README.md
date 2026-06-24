@@ -89,7 +89,12 @@ reconx deep target.com
 git clone https://github.com/lattu-2003/reconx.git
 cd reconx
 
-# Install in development mode
+# Create virtual environment (required on Kali/Parrot/modern Debian)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Upgrade pip and install
+pip install --upgrade pip setuptools wheel
 pip install -e .
 
 # Verify all tools are available

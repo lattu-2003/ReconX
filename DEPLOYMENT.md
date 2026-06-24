@@ -154,13 +154,19 @@ All commands should print a version string without errors. If any command return
 git clone https://github.com/lattu-2003/reconx.git
 cd reconx
 
-# Create a virtual environment (recommended)
+# Create a virtual environment (REQUIRED on Kali/Parrot/modern Debian — PEP 668)
 python3 -m venv .venv
 source .venv/bin/activate
+
+# Upgrade pip and core build tools
+pip install --upgrade pip setuptools wheel
 
 # Install ReconX in editable/development mode
 pip install -e .
 ```
+
+> [!IMPORTANT]
+> Modern Debian-based distros (Kali, Parrot, Ubuntu 23.04+) enforce **PEP 668** — you **must** use a virtual environment. Running `pip install` outside a venv will fail with `error: externally-managed-environment`.
 
 ### Verify the CLI
 
