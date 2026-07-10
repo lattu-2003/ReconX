@@ -3,6 +3,10 @@ ReconX Scan Orchestrator
 
 Coordinates the execution of all scanning modules in the
 correct order based on the selected scan profile.
+
+Module errors are handled gracefully: non-critical modules
+are skipped with a warning, and the scan continues to produce
+a report.  Only failures in *required* modules abort the scan.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from rich.table import Table
 
 from reconx import __version__
 from reconx.config import ReconXConfig, ScanProfile, PROFILE_MODULES
-from reconx.core.runner import ToolRunner
+from reconx.core.runner import ToolRunner, ToolNotFoundError
 from reconx.core.scope import ScopeManager
 from reconx.core.security import AuditLogger, FileSecurityManager
 from reconx.database.engine import DatabaseManager
@@ -26,7 +30,7 @@ from reconx.database.repository import ReconRepository
 # Module imports
 from reconx.modules.discovery import DiscoveryModule
 from reconx.modules.ports import PortsModule
-from reconx.modules.validation import ValidationModule
+from reconx.modules.validation import ValidationModule, HttpxBinaryError
 from reconx.modules.screenshots import ScreenshotsModule
 from reconx.modules.crawling import CrawlingModule
 from reconx.modules.historical import HistoricalModule
@@ -46,10 +50,52 @@ BANNER = r"""
  |  _ \ ___  ___ ___  _ _\ \/ /
  | |_) / _ \/ __/ _ \| '_ \  /
  |  _ <  __/ (_| (_) | | | /  \
- |_| \_\___|\___\___/|_| /_/\_\
+ |_| \_\___|\___|___/|_| /_/\_\
 [/bold cyan]
 [dim]  Attack Surface Intelligence Framework v{version}[/dim]
 """
+
+# ── Module Criticality ────────────────────────────────────────────────
+# Modules listed here are REQUIRED — if they fail the entire scan aborts.
+# All other modules are optional and will be skipped gracefully on error.
+REQUIRED_MODULES: frozenset[str] = frozenset({"discovery"})
+
+# Tool errors that should be caught and treated as "skip" for optional modules
+_TOOL_ERRORS = (ToolNotFoundError, HttpxBinaryError, FileNotFoundError, OSError)
+
+
+class ModuleStatus:
+    """Tracks the execution status of each module in a scan."""
+
+    def __init__(self) -> None:
+        self._statuses: dict[str, str] = {}  # module -> "ok" | "skipped" | "failed"
+        self._reasons: dict[str, str] = {}   # module -> failure reason
+
+    def mark_ok(self, module: str) -> None:
+        self._statuses[module] = "ok"
+
+    def mark_skipped(self, module: str, reason: str) -> None:
+        self._statuses[module] = "skipped"
+        self._reasons[module] = reason
+
+    def mark_failed(self, module: str, reason: str) -> None:
+        self._statuses[module] = "failed"
+        self._reasons[module] = reason
+
+    @property
+    def skipped(self) -> dict[str, str]:
+        return {m: self._reasons[m] for m, s in self._statuses.items() if s == "skipped"}
+
+    @property
+    def failed(self) -> dict[str, str]:
+        return {m: self._reasons[m] for m, s in self._statuses.items() if s == "failed"}
+
+    @property
+    def ok(self) -> list[str]:
+        return [m for m, s in self._statuses.items() if s == "ok"]
+
+    def has_issues(self) -> bool:
+        return bool(self.skipped or self.failed)
 
 
 class ScanEngine:
@@ -59,6 +105,10 @@ class ScanEngine:
     Coordinates all modules in the correct execution order
     based on the selected scan profile. Manages database
     lifecycle, scope validation, and reporting.
+
+    Non-critical module failures are logged and skipped so
+    the scan can complete and generate a partial report.
+    Only modules in ``REQUIRED_MODULES`` cause a fatal abort.
     """
 
     def __init__(self, config: ReconXConfig) -> None:
@@ -104,6 +154,41 @@ class ScanEngine:
                 if f.is_file():
                     f.unlink()
 
+    def _handle_module_error(
+        self,
+        module_name: str,
+        error: Exception,
+        status: ModuleStatus,
+    ) -> None:
+        """Handle a module error — skip or abort depending on criticality.
+
+        Args:
+            module_name: The name of the module that failed.
+            error: The exception that was raised.
+            status: The ModuleStatus tracker.
+
+        Raises:
+            The original exception if the module is required.
+        """
+        reason = f"{type(error).__name__}: {error}"
+
+        if module_name in REQUIRED_MODULES:
+            status.mark_failed(module_name, reason)
+            console.print(
+                f"  [bold red]✗ FATAL:[/] Required module "
+                f"[bold]{module_name}[/] failed: {error}\n"
+                f"  [red]Scan cannot continue without this module.[/]\n"
+            )
+            raise  # re-raise to abort the scan
+
+        # Optional module — skip gracefully
+        status.mark_skipped(module_name, reason)
+        console.print(
+            f"  [yellow]⚠ Module [bold]{module_name}[/bold] skipped:[/] "
+            f"{error}\n"
+            f"  [dim]The scan will continue without this module's data.[/]\n"
+        )
+
     async def run_scan(
         self,
         targets: list[str],
@@ -132,6 +217,8 @@ class ScanEngine:
         )
 
         await self._initialize()
+        status = ModuleStatus()
+        scan_id = -1
 
         try:
             # Validate scope
@@ -170,120 +257,172 @@ class ScanEngine:
             all_urls: list[str] = []
             js_files: list[str] = []
             all_technologies: list[str] = []
-            profiles = []
+            profiles_data = []
 
-            # Module 1: Discovery
+            # Module 1: Discovery (REQUIRED)
             if "discovery" in active_modules:
-                discovery = DiscoveryModule(
-                    self._config, self._runner, self._repo
-                )
-                result = await discovery.run(scan_id, validated_targets)
-                subdomains = result.subdomains
+                try:
+                    discovery = DiscoveryModule(
+                        self._config, self._runner, self._repo
+                    )
+                    result = await discovery.run(scan_id, validated_targets)
+                    subdomains = result.subdomains
+                    status.mark_ok("discovery")
+                except Exception as e:
+                    self._handle_module_error("discovery", e, status)
 
             # Module 2: Port Discovery
             if "ports" in active_modules and subdomains:
-                ports_mod = PortsModule(
-                    self._config, self._runner, self._repo
-                )
-                result = await ports_mod.run(scan_id, subdomains)
-                hosts_with_ports = result.hosts_with_ports
+                try:
+                    ports_mod = PortsModule(
+                        self._config, self._runner, self._repo
+                    )
+                    result = await ports_mod.run(scan_id, subdomains)
+                    hosts_with_ports = result.hosts_with_ports
+                    status.mark_ok("ports")
+                except Exception as e:
+                    self._handle_module_error("ports", e, status)
 
             # Module 3: Validation
             if "validation" in active_modules and subdomains:
-                validation = ValidationModule(
-                    self._config, self._runner, self._repo
-                )
-                take_screenshots = "screenshots" in active_modules
-                result = await validation.run(
-                    scan_id,
-                    subdomains,
-                    ports_data=hosts_with_ports or None,
-                    take_screenshots=take_screenshots,
-                )
-                live_urls = result.urls
+                try:
+                    validation = ValidationModule(
+                        self._config, self._runner, self._repo
+                    )
+                    take_screenshots = "screenshots" in active_modules
+                    result = await validation.run(
+                        scan_id,
+                        subdomains,
+                        ports_data=hosts_with_ports or None,
+                        take_screenshots=take_screenshots,
+                    )
+                    live_urls = result.urls
+                    status.mark_ok("validation")
 
-                # Extract technologies for smart Nuclei scanning
-                for host_data in result.live_hosts:
-                    techs = host_data.get("tech", [])
-                    if isinstance(techs, list):
-                        all_technologies.extend(techs)
+                    # Extract technologies for smart Nuclei scanning
+                    for host_data in result.live_hosts:
+                        techs = host_data.get("tech", [])
+                        if isinstance(techs, list):
+                            all_technologies.extend(techs)
+                except Exception as e:
+                    self._handle_module_error("validation", e, status)
 
             # Module 4: Screenshots
             if "screenshots" in active_modules:
-                screenshots = ScreenshotsModule(self._config, self._repo)
-                await screenshots.run(scan_id)
+                try:
+                    screenshots = ScreenshotsModule(self._config, self._repo)
+                    await screenshots.run(scan_id)
+                    status.mark_ok("screenshots")
+                except Exception as e:
+                    self._handle_module_error("screenshots", e, status)
 
             # Module 5: Crawling
             if "crawling" in active_modules and live_urls:
-                crawling = CrawlingModule(
-                    self._config, self._runner, self._repo
-                )
-                result = await crawling.run(scan_id, live_urls)
-                all_urls = result.urls
-                js_files = result.js_files
+                try:
+                    crawling = CrawlingModule(
+                        self._config, self._runner, self._repo
+                    )
+                    result = await crawling.run(scan_id, live_urls)
+                    all_urls = result.urls
+                    js_files = result.js_files
+                    status.mark_ok("crawling")
+                except Exception as e:
+                    self._handle_module_error("crawling", e, status)
 
             # Module 6: Historical
             if "historical" in active_modules:
-                historical = HistoricalModule(
-                    self._config, self._runner, self._repo
-                )
-                result = await historical.run(
-                    scan_id, validated_targets, known_urls=all_urls
-                )
-                all_urls.extend(result.urls)
+                try:
+                    historical = HistoricalModule(
+                        self._config, self._runner, self._repo
+                    )
+                    result = await historical.run(
+                        scan_id, validated_targets, known_urls=all_urls
+                    )
+                    all_urls.extend(result.urls)
+                    status.mark_ok("historical")
+                except Exception as e:
+                    self._handle_module_error("historical", e, status)
 
             # Module 7: JavaScript Intelligence
             if "javascript" in active_modules and js_files:
-                js_intel = JavaScriptModule(self._config, self._repo)
-                result = await js_intel.run(scan_id, js_files)
-                # Add discovered endpoints to URL pool
-                all_urls.extend(result.endpoints)
+                try:
+                    js_intel = JavaScriptModule(self._config, self._repo)
+                    result = await js_intel.run(scan_id, js_files)
+                    all_urls.extend(result.endpoints)
+                    status.mark_ok("javascript")
+                except Exception as e:
+                    self._handle_module_error("javascript", e, status)
 
             # Module 8: Classification
             if "classification" in active_modules and all_urls:
-                classification = ClassificationModule(
-                    self._config, self._repo
-                )
-                await classification.run(scan_id, all_urls)
+                try:
+                    classification = ClassificationModule(
+                        self._config, self._repo
+                    )
+                    await classification.run(scan_id, all_urls)
+                    status.mark_ok("classification")
+                except Exception as e:
+                    self._handle_module_error("classification", e, status)
 
             # Module 9: Intelligence
             if "intelligence" in active_modules:
-                intelligence = IntelligenceModule(
-                    self._config, self._repo
-                )
-                result = await intelligence.run(scan_id)
-                profiles = result.profiles
+                try:
+                    intelligence = IntelligenceModule(
+                        self._config, self._repo
+                    )
+                    result = await intelligence.run(scan_id)
+                    profiles_data = result.profiles
+                    status.mark_ok("intelligence")
+                except Exception as e:
+                    self._handle_module_error("intelligence", e, status)
 
             # Module 10: Scoring
-            if "scoring" in active_modules and profiles:
-                scoring = ScoringModule(self._config, self._repo)
-                await scoring.run(scan_id, profiles)
+            if "scoring" in active_modules and profiles_data:
+                try:
+                    scoring = ScoringModule(self._config, self._repo)
+                    await scoring.run(scan_id, profiles_data)
+                    status.mark_ok("scoring")
+                except Exception as e:
+                    self._handle_module_error("scoring", e, status)
 
             # Module 11: Vulnerability Scanning
             if "vulnerability" in active_modules and live_urls:
-                vuln = VulnerabilityModule(
-                    self._config, self._runner, self._repo
-                )
-                await vuln.run(
-                    scan_id, live_urls, all_technologies=all_technologies
-                )
+                try:
+                    vuln = VulnerabilityModule(
+                        self._config, self._runner, self._repo
+                    )
+                    await vuln.run(
+                        scan_id, live_urls, all_technologies=all_technologies
+                    )
+                    status.mark_ok("vulnerability")
+                except Exception as e:
+                    self._handle_module_error("vulnerability", e, status)
 
             # Module 12: Change Detection
             if "changes" in active_modules:
-                changes = ChangesModule(self._config, self._repo)
-                for target in validated_targets:
-                    await changes.run(scan_id, target)
+                try:
+                    changes = ChangesModule(self._config, self._repo)
+                    for target in validated_targets:
+                        await changes.run(scan_id, target)
+                    status.mark_ok("changes")
+                except Exception as e:
+                    self._handle_module_error("changes", e, status)
 
             # ── Scan Complete ─────────────────────────────────────
 
+            # Determine final scan status
+            final_status = "completed"
+            if status.has_issues():
+                final_status = "completed_with_warnings"
+
             # Update scan status
             await self._repo.update_scan_status(
-                scan_id, "completed", finished_at=datetime.now(timezone.utc)
+                scan_id, final_status, finished_at=datetime.now(timezone.utc)
             )
 
             # Get and display summary
             summary = await self._repo.get_scan_summary(scan_id)
-            self._display_summary(summary, profile)
+            self._display_summary(summary, profile, status)
 
             # Log completion
             self._audit.log_scan_complete(
@@ -294,7 +433,7 @@ class ScanEngine:
 
         except Exception as e:
             console.print(f"\n[bold red]✗ Scan failed:[/] {e}")
-            if self._repo and scan_id:
+            if self._repo and scan_id > 0:
                 await self._repo.update_scan_status(
                     scan_id, "failed", finished_at=datetime.now(timezone.utc)
                 )
@@ -304,9 +443,12 @@ class ScanEngine:
             await self._cleanup()
 
     def _display_summary(
-        self, summary: dict, profile: ScanProfile
+        self,
+        summary: dict,
+        profile: ScanProfile,
+        status: ModuleStatus,
     ) -> None:
-        """Display scan completion summary."""
+        """Display scan completion summary including module status."""
         table = Table(title="Scan Summary", show_lines=True)
         table.add_column("Metric", style="cyan", no_wrap=True)
         table.add_column("Count", justify="right", style="bold")
@@ -330,10 +472,48 @@ class ScanEngine:
 
         console.print("\n")
         console.print(table)
-        console.print(
-            f"\n[bold green]✓ Scan complete![/] "
-            f"Profile: {profile.value.upper()}\n"
-        )
+
+        # Show module status if there were issues
+        if status.has_issues():
+            console.print("")
+            status_table = Table(
+                title="Module Status",
+                show_lines=True,
+                border_style="yellow",
+            )
+            status_table.add_column("Module", style="bold")
+            status_table.add_column("Status")
+            status_table.add_column("Reason", max_width=60)
+
+            for module in status.ok:
+                status_table.add_row(module, "[green]✓ OK[/]", "")
+
+            for module, reason in status.skipped.items():
+                status_table.add_row(
+                    module,
+                    "[yellow]⚠ Skipped[/]",
+                    f"[dim]{reason[:60]}[/]",
+                )
+
+            for module, reason in status.failed.items():
+                status_table.add_row(
+                    module,
+                    "[red]✗ Failed[/]",
+                    f"[dim]{reason[:60]}[/]",
+                )
+
+            console.print(status_table)
+            console.print(
+                "\n[yellow]⚠ Scan completed with warnings.[/] "
+                "Some modules were skipped due to missing or "
+                "incompatible tools.\n"
+                "[dim]Install missing tools and re-run for full coverage.[/]\n"
+            )
+        else:
+            console.print(
+                f"\n[bold green]✓ Scan complete![/] "
+                f"Profile: {profile.value.upper()}\n"
+            )
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of all required tools."""
