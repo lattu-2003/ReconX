@@ -114,6 +114,26 @@ class ReconXConfig(BaseSettings):
     # ── Crawling Configuration ─────────────────────────────────────────
     crawl_depth: int = Field(default=3, ge=1, le=10, description="Katana crawl depth")
 
+    # ── Tool Binary Paths ──────────────────────────────────────────────
+    # Explicit paths to tool binaries.  When set, these take priority
+    # over PATH resolution.  Keys must match ToolRunner.ALLOWED_TOOLS.
+    # Override via env: RECONX_TOOL_PATHS='{"httpx": "/usr/local/bin/httpx"}'
+    tool_paths: dict[str, str] = Field(
+        default_factory=dict,
+        description="Explicit binary paths for tools (tool_name -> absolute_path)",
+    )
+
+    # Common directories where Go installs binaries.
+    # ToolRunner searches these if a tool is not on PATH.
+    go_bin_dirs: list[str] = Field(
+        default_factory=lambda: [
+            "/root/go/bin",
+            str(Path.home() / "go" / "bin"),
+            "/usr/local/go/bin",
+        ],
+        description="Additional directories to search for Go-installed tool binaries",
+    )
+
     # ── Display Configuration ──────────────────────────────────────────
     show_secrets: bool = Field(
         default=False,

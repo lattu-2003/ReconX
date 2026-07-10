@@ -132,10 +132,12 @@ class ScanEngine:
         await self._db.initialize()
         self._repo = ReconRepository(self._db.session_factory)
 
-        # Initialize tool runner
+        # Initialize tool runner with configured binary paths
         self._runner = ToolRunner(
             audit_logger=self._audit,
             timeout=self._config.scan_timeout,
+            tool_path_overrides=self._config.tool_paths or None,
+            extra_search_dirs=self._config.go_bin_dirs or None,
         )
 
         # Initialize scope manager
@@ -517,7 +519,10 @@ class ScanEngine:
 
     async def check_tools(self) -> dict[str, bool]:
         """Check availability of all required tools."""
-        self._runner = ToolRunner()
+        self._runner = ToolRunner(
+            tool_path_overrides=self._config.tool_paths or None,
+            extra_search_dirs=self._config.go_bin_dirs or None,
+        )
         return self._runner.check_all_tools()
 
     async def get_scope(self) -> dict[str, list[str]]:

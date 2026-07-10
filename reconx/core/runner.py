@@ -58,24 +58,36 @@ class ToolRunner:
         self,
         audit_logger: AuditLogger | None = None,
         timeout: int = 600,
+        tool_path_overrides: dict[str, str] | None = None,
+        extra_search_dirs: list[str] | None = None,
     ) -> None:
         """Initialise the tool runner.
 
         Args:
             audit_logger: Optional audit logger for recording executions.
             timeout: Default timeout in seconds for tool invocations.
+            tool_path_overrides: Explicit binary paths keyed by tool name.
+                These take priority over PATH resolution.
+            extra_search_dirs: Additional directories to search for tools
+                when ``shutil.which()`` fails (e.g. Go bin directories).
         """
         self._audit_logger = audit_logger
         self._timeout = timeout
         self._tool_paths: dict[str, str] = {}
+        self._overrides: dict[str, str] = tool_path_overrides or {}
+        self._extra_dirs: list[str] = extra_search_dirs or []
 
     # ── Binary Resolution ─────────────────────────────────────────────
 
     def _resolve_tool(self, tool: str) -> str:
         """Find the absolute path to a tool binary.
 
-        Results are cached so that repeated calls to the same tool do
-        not hit the filesystem.
+        Resolution order:
+        1. Explicit override from ``tool_path_overrides``
+        2. ``shutil.which()`` on the current ``PATH``
+        3. Direct lookup in ``extra_search_dirs`` (e.g. Go bin dirs)
+
+        Results are cached so repeated calls avoid filesystem hits.
 
         Args:
             tool: Tool name from :attr:`ALLOWED_TOOLS`.
@@ -85,7 +97,7 @@ class ToolRunner:
 
         Raises:
             SecurityError: If ``tool`` is not in the allowlist.
-            ToolNotFoundError: If the binary is not found on ``PATH``.
+            ToolNotFoundError: If the binary cannot be found anywhere.
         """
         if tool not in self.ALLOWED_TOOLS:
             raise SecurityError(
@@ -96,15 +108,48 @@ class ToolRunner:
         if tool in self._tool_paths:
             return self._tool_paths[tool]
 
-        resolved = shutil.which(tool)
-        if resolved is None:
-            raise ToolNotFoundError(
-                f"Tool {tool!r} not found on PATH. "
-                f"Install it and ensure it is accessible."
-            )
+        # 1. Check explicit override
+        if tool in self._overrides:
+            override_path = self._overrides[tool]
+            if os.path.isfile(override_path) and os.access(override_path, os.X_OK):
+                self._tool_paths[tool] = override_path
+                logger.info("Using configured path for %s: %s", tool, override_path)
+                return override_path
+            else:
+                raise ToolNotFoundError(
+                    f"Configured path for {tool!r} does not exist or is not "
+                    f"executable: {override_path!r}"
+                )
 
-        self._tool_paths[tool] = resolved
-        return resolved
+        # 2. Try shutil.which() on PATH
+        resolved = shutil.which(tool)
+        if resolved is not None:
+            self._tool_paths[tool] = resolved
+            return resolved
+
+        # 3. Search extra directories (e.g. /root/go/bin, ~/go/bin)
+        for search_dir in self._extra_dirs:
+            candidate = os.path.join(search_dir, tool)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                self._tool_paths[tool] = candidate
+                logger.info(
+                    "Found %s in fallback directory: %s", tool, candidate
+                )
+                return candidate
+
+        # Build a helpful error message listing all searched locations
+        searched = ["PATH (via shutil.which)"]
+        if self._extra_dirs:
+            searched.extend(self._extra_dirs)
+        searched_str = "\n  • ".join(searched)
+
+        raise ToolNotFoundError(
+            f"Tool {tool!r} not found. Searched:\n  • {searched_str}\n\n"
+            f"Install it with:\n"
+            f"  go install -v github.com/projectdiscovery/{tool}/cmd/{tool}@latest\n\n"
+            f"Or set an explicit path in your config or .env:\n"
+            f'  RECONX_TOOL_PATHS=\'{{\"{tool}\": \"/path/to/{tool}\"}}\''
+        )
 
     def _minimal_env(self) -> dict[str, str]:
         """Build a minimal environment for subprocess execution.
@@ -133,7 +178,10 @@ class ToolRunner:
     # ── Tool Availability ─────────────────────────────────────────────
 
     def check_tool(self, tool: str) -> bool:
-        """Check whether a single tool is available on PATH.
+        """Check whether a single tool is available.
+
+        Uses the same resolution logic as execution (overrides → PATH →
+        extra dirs) so results are consistent with actual tool runs.
 
         Args:
             tool: Tool name to check.
@@ -141,9 +189,11 @@ class ToolRunner:
         Returns:
             ``True`` if the tool binary is found, ``False`` otherwise.
         """
-        if tool not in self.ALLOWED_TOOLS:
+        try:
+            self._resolve_tool(tool)
+            return True
+        except (ToolNotFoundError, SecurityError):
             return False
-        return shutil.which(tool) is not None
 
     def check_all_tools(self) -> dict[str, bool]:
         """Check availability of all allowed tools.
