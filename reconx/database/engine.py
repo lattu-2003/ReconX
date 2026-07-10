@@ -103,6 +103,20 @@ class DatabaseManager:
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """Return the session factory for direct use by repositories.
+
+        Raises:
+            RuntimeError: If :meth:`initialize` has not been called yet.
+        """
+        if self._session_factory is None:
+            raise RuntimeError(
+                "DatabaseManager has not been initialized. "
+                "Call 'await db.initialize()' first."
+            )
+        return self._session_factory
+
     @asynccontextmanager
     async def get_session(self) -> AsyncIterator[AsyncSession]:
         """Yield an async session, committing on success or rolling back on error.
