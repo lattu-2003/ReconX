@@ -525,6 +525,38 @@ class ReconRepository:
             result = await session.execute(select(Scope))
             return list(result.scalars().all())
 
+    # ── ScopeRepository Protocol Methods ──────────────────────────
+    # These satisfy the ScopeRepository protocol expected by ScopeManager.
+
+    async def get_scope_rules(self) -> list[dict[str, str]]:
+        """Return all scope rules as dictionaries.
+
+        This is the protocol-compatible version of :meth:`get_scope`
+        that returns dicts with ``target`` and ``scope_type`` keys,
+        as required by :class:`ScopeManager.load_scope`.
+
+        Returns:
+            List of dicts, each with ``target`` and ``scope_type`` keys.
+            Returns an empty list if no rules exist or on error.
+        """
+        try:
+            scope_objects = await self.get_scope()
+            return [
+                {"target": s.target, "scope_type": s.scope_type}
+                for s in scope_objects
+                if hasattr(s, "target") and hasattr(s, "scope_type")
+            ]
+        except Exception:
+            return []
+
+    async def add_scope_rule(self, target: str, scope_type: str) -> None:
+        """Add a scope rule (protocol-compatible alias for :meth:`add_scope`)."""
+        await self.add_scope(target, scope_type)
+
+    async def remove_scope_rule(self, target: str) -> None:
+        """Remove a scope rule (protocol-compatible alias for :meth:`remove_scope`)."""
+        await self.remove_scope(target)
+
     # ------------------------------------------------------------------
     # Aggregation / Summaries
     # ------------------------------------------------------------------

@@ -79,15 +79,42 @@ class ScopeManager:
         """Load scope rules from the database into local caches.
 
         This should be called once at scan startup and again if rules
-        are modified externally.
+        are modified externally.  Handles missing/malformed records
+        gracefully — invalid entries are skipped with a warning.
         """
-        rules = await self._repo.get_scope_rules()
-        self._includes = [
-            r["target"] for r in rules if r["scope_type"] == "include"
-        ]
-        self._excludes = [
-            r["target"] for r in rules if r["scope_type"] == "exclude"
-        ]
+        self._includes = []
+        self._excludes = []
+
+        try:
+            rules = await self._repo.get_scope_rules()
+        except Exception as exc:
+            logger.warning("Failed to load scope rules: %s", exc)
+            return
+
+        if not rules or not isinstance(rules, list):
+            logger.info("No scope rules found — open scope active")
+            return
+
+        for rule in rules:
+            if not isinstance(rule, dict):
+                logger.warning("Skipping invalid scope rule (not a dict): %r", rule)
+                continue
+
+            target = rule.get("target")
+            scope_type = rule.get("scope_type")
+
+            if not target or not isinstance(target, str):
+                logger.warning("Skipping scope rule with missing/invalid target: %r", rule)
+                continue
+            if scope_type not in ("include", "exclude"):
+                logger.warning("Skipping scope rule with invalid scope_type: %r", rule)
+                continue
+
+            if scope_type == "include":
+                self._includes.append(target)
+            else:
+                self._excludes.append(target)
+
         logger.info(
             "Loaded scope: %d include rules, %d exclude rules",
             len(self._includes),
