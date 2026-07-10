@@ -10,18 +10,22 @@ against the wrong ``httpx`` binary (e.g. the Python httpx CLI).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from rich.console import Console
 
-from reconx.core.runner import ToolRunner
+from reconx.core.runner import ToolRunner, ToolNotFoundError
 from reconx.core.utils import build_url, deduplicate_dicts, write_lines_to_file
 from reconx.config import ReconXConfig
 from reconx.database.repository import ReconRepository
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 class HttpxBinaryError(Exception):
@@ -52,8 +56,19 @@ class ValidationModule:
     detects the correct input-list flag (``-l`` vs ``-list``).
     """
 
-    # Strings that confirm we have the ProjectDiscovery binary
-    _PD_SIGNATURES = ("projectdiscovery", "pd", "httpx")
+    # Patterns that confirm we have the ProjectDiscovery binary.
+    # Checked against the COMBINED stdout+stderr output of `httpx -version`.
+    # PD httpx outputs formats like:
+    #   "Current Version: v1.6.9"
+    #   "httpx version 1.6.9"
+    #   "projectdiscovery/httpx v1.6.9"
+    _PD_SIGNATURES = (
+        "projectdiscovery",
+        "current version",
+        "current:",
+    )
+    # Regex to match a version string like "v1.6.9" or "1.6.9"
+    _VERSION_RE = re.compile(r"v?\d+\.\d+\.\d+")
 
     def __init__(
         self,
@@ -69,9 +84,9 @@ class ValidationModule:
     async def _detect_httpx(self) -> str:
         """Detect which httpx binary is installed and return the correct list flag.
 
-        Runs ``httpx -version`` to verify this is ProjectDiscovery httpx.
-        Then probes ``httpx -h`` output to determine whether ``-l`` or
-        ``-list`` is the supported input-list flag.
+        Uses a direct subprocess call (not runner.run) to capture BOTH
+        stdout and stderr, since ProjectDiscovery httpx may write its
+        version to either stream.
 
         Returns:
             The correct list flag string (``"-l"`` or ``"-list"``).
@@ -80,65 +95,135 @@ class ValidationModule:
             HttpxBinaryError: If httpx is missing, is the wrong binary,
                 or its version/flags cannot be determined.
         """
-        # ── Step 1: Verify this is ProjectDiscovery httpx ─────────
-        if not self._runner.check_tool("httpx"):
-            raise HttpxBinaryError(
-                "httpx is not installed or not on PATH. "
-                "Install it with: go install -v "
-                "github.com/projectdiscovery/httpx/cmd/httpx@latest"
-            )
+        # ── Step 1: Resolve the binary path ───────────────────────
+        try:
+            binary_path = self._runner._resolve_tool("httpx")
+        except ToolNotFoundError as exc:
+            raise HttpxBinaryError(str(exc)) from exc
+
+        logger.info("[httpx-detect] Resolved binary path: %s", binary_path)
+        console.print(f"  [dim]httpx binary: {binary_path}[/]")
+
+        # ── Step 2: Run version check with full output capture ────
+        cmd = [binary_path, "-version"]
+        logger.info("[httpx-detect] Running: %s", " ".join(cmd))
 
         try:
-            version_output = await self._runner.run(
-                "httpx", ["-version"], parse_json=False, target="version-check"
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=15
+            )
+        except asyncio.TimeoutError:
+            raise HttpxBinaryError(
+                f"'httpx -version' timed out (binary: {binary_path})"
             )
         except Exception as exc:
             raise HttpxBinaryError(
-                f"Failed to run 'httpx -version': {exc}"
+                f"Failed to run '{binary_path} -version': {exc}"
             ) from exc
 
-        version_text = version_output.strip().lower() if isinstance(version_output, str) else ""
+        stdout_text = stdout_bytes.decode("utf-8", errors="replace").strip()
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+        exit_code = proc.returncode
 
-        if not any(sig in version_text for sig in self._PD_SIGNATURES):
+        # ── DEBUG LOGGING ─────────────────────────────────────────
+        logger.info("[httpx-detect] Exit code: %d", exit_code)
+        logger.info("[httpx-detect] Stdout: %r", stdout_text)
+        logger.info("[httpx-detect] Stderr: %r", stderr_text)
+
+        console.print(f"  [dim]httpx -version exit code: {exit_code}[/]")
+        if stdout_text:
+            console.print(f"  [dim]  stdout: {stdout_text[:200]}[/]")
+        if stderr_text:
+            console.print(f"  [dim]  stderr: {stderr_text[:200]}[/]")
+
+        # ── Step 3: Validate this is ProjectDiscovery httpx ───────
+        # Combine stdout + stderr since PD httpx can output to either
+        combined = f"{stdout_text}\n{stderr_text}".lower()
+
+        is_pd_httpx = False
+
+        # Check known PD signatures
+        for sig in self._PD_SIGNATURES:
+            if sig in combined:
+                is_pd_httpx = True
+                break
+
+        # Also accept if it looks like a semver version from a Go binary
+        # (Python httpx outputs "httpx, version X.Y.Z" with different format)
+        if not is_pd_httpx and self._VERSION_RE.search(combined):
+            # PD httpx versions are like "v1.6.9", Python httpx like "0.27.0"
+            version_match = self._VERSION_RE.search(combined)
+            if version_match:
+                version_str = version_match.group()
+                # PD httpx major version is >= 1; Python httpx is 0.x
+                if version_str.startswith("v") or not version_str.startswith("0."):
+                    is_pd_httpx = True
+                    logger.info(
+                        "[httpx-detect] Accepted via version pattern: %s",
+                        version_str,
+                    )
+
+        if not is_pd_httpx:
             raise HttpxBinaryError(
-                f"The httpx binary on PATH is not ProjectDiscovery's httpx. "
-                f"'httpx -version' returned: {version_output.strip()!r}\n"
-                f"Install the correct one with: go install -v "
-                f"github.com/projectdiscovery/httpx/cmd/httpx@latest"
+                f"The httpx at '{binary_path}' does not appear to be "
+                f"ProjectDiscovery's httpx.\n"
+                f"  Exit code: {exit_code}\n"
+                f"  Stdout: {stdout_text!r}\n"
+                f"  Stderr: {stderr_text!r}\n\n"
+                f"Install the correct binary:\n"
+                f"  go install -v github.com/projectdiscovery/httpx/"
+                f"cmd/httpx@latest\n\n"
+                f"Or set an explicit path in .env:\n"
+                f'  RECONX_TOOL_PATHS=\'{{"httpx": "/root/go/bin/httpx"}}\''
             )
 
-        console.print(f"  [dim]Detected httpx: {version_output.strip()}[/]")
+        # Show the detected version
+        display_version = stdout_text or stderr_text
+        console.print(f"  [green]✓ ProjectDiscovery httpx: {display_version}[/]")
 
-        # ── Step 2: Detect the correct list flag ──────────────────
+        # ── Step 4: Detect the correct list flag ──────────────────
+        logger.info("[httpx-detect] Running: %s -h", binary_path)
+
         try:
-            help_output = await self._runner.run(
-                "httpx", ["-h"], parse_json=False, target="flag-check"
+            proc = await asyncio.create_subprocess_exec(
+                binary_path, "-h",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            h_stdout, h_stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=15
             )
         except Exception:
-            # If -h fails, default to -l (modern versions)
+            logger.info("[httpx-detect] -h failed, defaulting to -l")
             return "-l"
 
-        help_text = help_output if isinstance(help_output, str) else ""
+        # PD httpx sends help to stderr
+        help_text = h_stdout.decode("utf-8", errors="replace")
+        help_text += "\n" + h_stderr.decode("utf-8", errors="replace")
 
-        # Modern httpx uses -l or -list; check which appears in help
-        # Check for -l as a standalone flag (not as part of -list)
         has_dash_l = False
         has_dash_list = False
 
         for line in help_text.splitlines():
             stripped = line.strip()
-            # Look for the flag definitions in help text
             if stripped.startswith("-l,") or stripped.startswith("-l ") or "  -l," in stripped:
                 has_dash_l = True
             if "-list" in stripped:
                 has_dash_list = True
 
         if has_dash_l:
+            logger.info("[httpx-detect] Detected flag: -l")
             return "-l"
         elif has_dash_list:
+            logger.info("[httpx-detect] Detected flag: -list")
             return "-list"
         else:
-            # Fallback: try -l (most modern versions)
+            logger.info("[httpx-detect] Could not detect flag, defaulting to -l")
             console.print(
                 "  [yellow]⚠[/] Could not detect list flag from httpx help, "
                 "defaulting to -l"
